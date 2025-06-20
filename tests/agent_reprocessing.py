@@ -1,7 +1,7 @@
 import asyncio
-from preprocessing.agent_call import process_file
+from preprocessing.html_preprocessing import process_single_file
 
 if __name__ == "__main__":
-    file_path = "/Users/zihaomo/Downloads/AI填尽调报告/一个完整例子已填完/3.3 私募管理人及产品尽职调查问卷20221111 (1)_simplified copy.txt"
-    results = asyncio.run(process_file(file_path))
+    file_path = "/Users/zihaomo/Downloads/AI填尽调报告/未填的尽调报告/机构新format/东方财富证券私募类资产管理机构尽职调查报告（XXXX资产管理有限公司）-管理人提供.htm"
+    results = process_single_file(file_path)
     print(results)

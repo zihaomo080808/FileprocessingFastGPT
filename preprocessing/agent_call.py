@@ -4,35 +4,156 @@ from config import settings
 import re
 from configs.AI_prompts import FASTGPT_PROMPT, ERROR_PROMPT
 import asyncio
+import os
+import tiktoken
+from typing import Optional
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(name)s %(message)s'
+)
+
 logger = logging.getLogger(__name__)
 
 QUESTION_NUMBER = settings.QUESTION_NUMBER
 
-async def get_answers(questions: dict) -> dict:
-    """
-    Get answers from FastGPT for a dictionary of questions.
-    Returns a dictionary: {line_number: answer}
-    """
-    logger.info(f"Calling get_answers for {len(questions)} questions.")
+def count_tokens(text, model="gpt-3.5-turbo"):
+    enc = tiktoken.encoding_for_model(model)
+    return len(enc.encode(text))
+
+async def process_table_before_call(table_html: str, start_row: int, max_tokens=1000, model="gpt-3.5-turbo"):
+
+    tr_blocks = re.findall(r'(<tr[\s\S]*?</tr>)', table_html, re.IGNORECASE)
+    preserved_rows = []
+
+    for tr in tr_blocks:
+        tr_tag = re.match(r'<tr[^>]*>', tr, re.IGNORECASE)
+        tr_start = tr_tag.group(0) if tr_tag else '<tr>'
+        tr_end = '</tr>'
+
+        # Remove the <tr> and </tr> tags for cell processing
+        tr_inner = re.sub(r'^<tr[^>]*>', '', tr, flags=re.IGNORECASE)
+        tr_inner = re.sub(r'</tr>$', '', tr_inner, flags=re.IGNORECASE)
+
+        # Find all <td>...</td> blocks
+        td_blocks = re.findall(r'(<td[\s\S]*?</td>)', tr_inner, re.IGNORECASE)
+        processed_cells = []
+        if td_blocks:
+            for td in td_blocks:
+                allowed = []
+                nbsps = re.findall(r'&nbsp;', td)
+                codes = re.findall(r'<!--\s*绝对编码：.*?-->', td)
+                seen_codes = set()
+                unique_codes = []
+                for code in codes:
+                    if code not in seen_codes:
+                        unique_codes.append(code)
+                        seen_codes.add(code)
+                text = re.sub(r'<[^>]+>', '', td)
+                text = text.replace('&nbsp;', '').strip()
+                if text:
+                    allowed.append(text)
+                allowed.extend(nbsps)
+                allowed.extend(unique_codes)
+                if allowed:
+                    processed_cells.append('  ' + ' '.join(allowed) + '\n')  # Add newline after each cell
+        else:
+            lines = tr_inner.splitlines()
+            for line in lines:
+                allowed = []
+                codes = re.findall(r'<!--\s*绝对编码：.*?-->', line)
+                seen_codes = set()
+                unique_codes = []
+                for code in codes:
+                    if code not in seen_codes:
+                        unique_codes.append(code)
+                        seen_codes.add(code)
+                text = re.sub(r'<[^>]+>', '', line).strip()
+                if text:
+                    allowed.append(text)
+                allowed.extend(unique_codes)
+                if allowed:
+                    processed_cells.append('  ' + ' '.join(allowed) + '\n')  # Add newline after each line
+        content = ''.join(processed_cells)  # No join with \n, as each already ends with \n
+        preserved_rows.append(f"{tr_start}\n{content}{tr_end}")
+
+    # Now chunk the table if too long
+    chunks = []  # Each element: (chunk_string, start_row_index)
+    current_chunk = []
+    current_tokens = 0
+    current_start_row = start_row
+    for i, row in enumerate(preserved_rows):
+        row_tokens = count_tokens(row, model=model)
+        if current_tokens + row_tokens > max_tokens and current_chunk:
+            # Start a new chunk
+            chunks.append(('\n'.join(current_chunk), current_start_row))
+            current_chunk = []
+            current_tokens = 0
+            current_start_row = i + 1  # Next chunk starts at this row (1-based)
+        current_chunk.append(row)
+        current_tokens += row_tokens
+
+    if current_chunk:
+        chunks.append(('\n'.join(current_chunk), current_start_row))
+
+    return chunks
+
+async def process_table_after_call(original_file_path: str, line_num: int, ai_table: str):
+    # Build a mapping from code to answer from the ai_table
+    ai_rows = re.findall(r'<tr>([\s\S]*?)</tr>', ai_table, re.IGNORECASE)
+    code_to_answer = {}
+
+    for row in ai_rows:
+        for code_match in re.finditer(r'<!--\s*绝对编码：(\d+)\s*-->', row):
+            code = code_match.group(1)
+            before_code = row[:code_match.start()]
+# Remove comments
+            before_code = re.sub(r'<!--.*?-->', '', before_code)
+            # Remove tags
+            before_code = re.sub(r'<[^>]+>', '', before_code)
+            # Split by newlines and get the last non-empty, stripped line
+            lines_before = before_code.split('\n')
+            answer = ''
+            for line in reversed(lines_before):
+                stripped = line.strip()
+                if stripped:
+                    answer = stripped
+                    break
+            answer = answer.replace('&nbsp;', '').strip()
+            if answer:
+                code_to_answer[code] = answer
+            else:
+                print(f"No answer extracted for code {code} in row: {row}")
+
+    # 2. Read the original file
+    with open(original_file_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    # 3. Loop from line_num to the next </table>
+    idx = line_num - 1  # line_num is 1-based
+    while idx < len(lines):
+        line = lines[idx]
+        if '</table>' in line:
+            break
+        code_match = re.search(r'<!--\s*绝对编码：(\d+)\s*-->', line)
+        if code_match in line:
+            code = code_match.group(1)
+            answer = code_to_answer.get(code)
+            if answer:
+                print(f"Replacing in line {idx}: {line.strip()} with answer: {answer}")
+                lines[idx] = line.replace('&nbsp;', answer, 1)
+            else:
+                print(f"No answer found in ai_table for code {code}")
+        idx += 1
+
+    with open(original_file_path, 'w', encoding='utf-8') as f:
+        f.writelines(lines)
+
+    return lines
+
+async def process_answers(questions: dict, answer: str, start_row: Optional[int] = None):
     final_answers = {}
-    prompt = f"{FASTGPT_PROMPT}\n{questions}"
-    try:
-        answer = await call_fastgpt(prompt)
-        # Check for context length error in the response (OpenAI-compatible error)
-        if isinstance(answer, dict) and 'error' in answer and (
-            'context_length_exceeded' in str(answer['error']) or 'maximum context length' in str(answer['error'])
-        ):
-            logger.warning("Prompt too long, retrying with ERROR_PROMPT.")
-            prompt = f"{ERROR_PROMPT}\n{questions}"
-            answer = await call_fastgpt(prompt)
-    except Exception as e:
-        logger.error(f"Error during FastGPT call: {e}. Retrying with ERROR_PROMPT.")
-        prompt = f"{ERROR_PROMPT}\n{questions}"
-        answer = await call_fastgpt(prompt)
-    logger.info(f"Received answer from FastGPT: {answer}")
-    if not answer.strip().startswith("<table>"):
+    if not answer.strip().startswith("<tr>"):
         message_chunks = [chunk.strip() for chunk in answer.split('|||')]
         keys = list(questions.keys())
         message_chunks = [chunk.strip() for chunk in answer.split('|||') if chunk.strip()]
@@ -53,7 +174,34 @@ async def get_answers(questions: dict) -> dict:
     else:
         key = list(questions.keys())[0]
         logger.info(f"Mapped table answer to line {key}: {answer}")
-        return {key: answer}
+        return {start_row: answer}
+
+
+async def get_answers(questions: dict) -> dict:
+    logger.info(f"Calling get_answers for {len(questions)} questions.")
+    final_answers = {}
+    # If questions is a dict with a single value that starts with <table>, preprocess it
+    if isinstance(questions, dict) and len(questions) == 1:
+        only_value = next(iter(questions.values()))
+        if isinstance(only_value, str) and only_value.strip().startswith('<table>'):
+            start_row = next(iter(questions.keys()))
+            questions_modified = await process_table_before_call(only_value, start_row)
+            for chunk, start_row in questions_modified:
+                prompt = f"{FASTGPT_PROMPT}\n{chunk}"
+                answer = await call_fastgpt(prompt)
+                logger.info(f"Received answer from FastGPT: {answer}")
+                final_answers.update(await process_answers(questions, answer, start_row))
+        else:
+            prompt = f"{FASTGPT_PROMPT}\n{questions}"
+            answer = await call_fastgpt(prompt)
+            logger.info(f"Received answer from FastGPT: {answer}")
+            final_answers = await process_answers(questions, answer)
+    else:
+        prompt = f"{FASTGPT_PROMPT}\n{questions}"
+        answer = await call_fastgpt(prompt)
+        logger.info(f"Received answer from FastGPT: {answer}")
+        final_answers = await process_answers(questions, answer)
+    return final_answers
 
 async def detect_next_line(file_path: str, line_num: int, answer: str):
     """
@@ -74,36 +222,6 @@ async def detect_next_line(file_path: str, line_num: int, answer: str):
     with open(file_path, 'w', encoding='utf-8') as f:
         f.writelines(lines)
     logger.info(f"File {file_path} updated with answer.")
-    return lines
-
-async def detect_next_line_table(file_path: str, line_num: int, answer: str):
-    """
-    Finds how many lines the answer spans, and replaces the next n lines in the HTML file
-    (starting at line_num) with each line of the answer.
-    Modifies the file in place.
-    Also parses '\n' in the answer as real newlines and preserves indentation.
-    """
-    logger.info(f"Detecting next table lines after line {line_num} in {file_path}.")
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        lines = f.readlines()
-    # Replace '\n' with real newlines and split into lines
-    answer_html = answer.replace('\\n', '\n') if '\\n' in answer else answer.replace('\n', '\n')
-    answer_lines = answer_html.split('\n')
-    n = len(answer_lines)
-    # Determine the indentation of the first line to replace
-    indent = ''
-    if line_num < len(lines):
-        match = re.match(r'(\s*)', lines[line_num])
-        if match:
-            indent = match.group(1)
-    for i in range(n):
-        if line_num - 1 + i < len(lines):
-            # Add indentation to each line
-            lines[line_num - 1 + i] = indent + answer_lines[i].rstrip() + '\n'
-            logger.info(f"Replaced line {line_num + i} with table answer line.")
-    with open(file_path, 'w', encoding='utf-8') as f:
-        f.writelines(lines)
-    logger.info(f"File {file_path} updated with table answer.")
     return lines
 
 async def get_answers_concurrent(batches, max_concurrent=10):
@@ -189,7 +307,7 @@ async def process_file(file_path: str):
         await detect_next_line(file_path, line_num, answer)
 
     for line_num, answer in table_answers.items():
-        await detect_next_line_table(file_path, line_num, answer)
+        await process_table_after_call(file_path, line_num, answer)
     
     logger.info(f"Finished processing file: {file_path}")
     return questions_dict, all_answers

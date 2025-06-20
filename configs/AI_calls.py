@@ -4,6 +4,7 @@ import logging
 from typing import Optional
 import json
 import requests
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ logging.basicConfig(
 
 FASTGPT_API_KEY = settings.FASTGPT_API_KEY
 url = settings.FASTGPT_URL
+
 
 async def extract_answer(response_json):
     content = response_json.get('choices', [{}])[0].get('message', {}).get('content', '')

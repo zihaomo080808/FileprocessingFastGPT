@@ -31,8 +31,8 @@ def extract_answers_from_simplified_html(simplified_html_path):
                 # 在同一行中查找答案内容
                 # 匹配模式：<p>答案内容<o:p></o:p></p> 或类似结构
                 answer_patterns = [
-                    r'<p>([^<]+)</o:p></p>',  # <p>答案<o:p></o:p></p>
-                    r'<p><o:p>([^<]+)</o:p></p>',  # <p>答案<o:p></o:p></p>
+                    r'<p>(.*?)<o:p>',  # <p>答案<o:p></o:p></p>
+                    r'<o:p>(.*?)</o:p>',  # <p>答案<o:p></o:p></p>
                     # r'<p>([^<]+)</p>',             # <p>答案</p>
                     # r'<td>([^<]+)</td>',           # <td>答案</td>
                     # r'>([^<]+)<o:p>',              # >答案<o:p>
@@ -49,38 +49,44 @@ def extract_answers_from_simplified_html(simplified_html_path):
                 
                 if answer:
                     answers_dict[row_num] = answer
-    print("answers_dict[3473]:", answers_dict.get(3473, "Not found"))
+    print("answers_dict", answers_dict)
     print(f"总共提取到 {len(answers_dict)} 个答案")
     return answers_dict
 
 def fill_html_template(template_html_path, answers_dict, output_html_path):
-    """将答案填入HTML模板文件"""
+    """将答案填入HTML模板文件（按行号直接替换）"""
     encoding = detect_encoding(template_html_path)
     
     with open(template_html_path, 'r', encoding=encoding, errors='ignore') as f:
         lines = f.readlines()
     
     filled_count = 0
+
+    pattern_op = re.compile(r'(<o:p>)(.*?)(</o:p>)', re.DOTALL)
+    pattern_span = re.compile(r'(<span[^>]*><o:p>)(.*?)(</o:p></span>)', re.DOTALL)
     
-    for i, line in enumerate(lines):
-        # 查找包含绝对编码注释的行
-        if '<!-- 绝对编码：' in line:
-            # 提取绝对编码
-            row_match = re.search(r'<!-- 绝对编码：(\d+) -->', line)
-            if row_match:
-                row_num = int(row_match.group(1))
-                
-                # 如果有对应的答案
-                if row_num in answers_dict:
-                    answer = answers_dict[row_num]
-                    
-                    # 替换空占位符为答案
-                    if re.search(r'<o:p>&nbsp;</o:p>', line):
-                        lines[i] = re.sub(r'<o:p>&nbsp;</o:p>', f'<o:p>{answer}</o:p>', line)
-                        filled_count += 1
-                    elif re.search(r'<span[^>]*><o:p>&nbsp;</o:p></span>', line):
-                        lines[i] = re.sub(r'<span[^>]*><o:p>&nbsp;</o:p></span>', f'<o:p>{answer}</o:p>', line)
-                        filled_count += 1
+    for row_num, answer in answers_dict.items():
+        idx = row_num - 1  # Convert to 0-based index
+        if 0 <= idx < len(lines):
+            line = lines[idx]
+            print(f"\nProcessing line {idx}: {repr(line)}")
+            print(f"  Targeting line {idx} for code {row_num} with answer: {repr(answer)}")
+            if pattern_op.search(line):
+                print(f"  [o:p] Before: {repr(line)}")
+                lines[idx] = pattern_op.sub(lambda m: m.group(1) + answer + m.group(3), line, count=1)
+                print(f"  [o:p] After:  {repr(lines[idx])}")
+                filled_count += 1
+                print(f"  Filled line {idx} with answer '{answer}'.")
+            elif pattern_span.search(line):
+                print(f"  [span] Before: {repr(line)}")
+                lines[idx] = pattern_span.sub(lambda m: m.group(1) + answer + m.group(3), line, count=1)
+                print(f"  [span] After:  {repr(lines[idx])}")
+                filled_count += 1
+                print(f"  Filled line {idx} with answer '{answer}'.")
+            else:
+                print(f"  No <o:p> or <span><o:p> found to replace in line {idx}.")
+        else:
+            print(f"  Line number {row_num} (index {idx}) is out of range for template.")
     
     # 保存结果
     with open(output_html_path, 'w', encoding=encoding) as f:

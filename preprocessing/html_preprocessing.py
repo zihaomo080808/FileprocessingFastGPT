@@ -33,6 +33,10 @@ def detect_encoding(file_path):
     result = chardet.detect(raw_data)
     return result['encoding']
 
+def add_one_space_before_p_in_td(html_content):
+    # For every line that starts with <td> and has spaces before <p>, add one more space before <p>
+    return re.sub(r'(<td>\s*)(<p>)', lambda m: m.group(1) + ' ' + m.group(2), html_content)
+
 
 def add_line_number_to_o_p(htm_file):
     """
@@ -47,15 +51,46 @@ def add_line_number_to_o_p(htm_file):
         lines = file.readlines()
 
     # 逐行处理，只在符合条件时增加注释
+    symbols = ['□', '■', '£']
     processed_lines = []
+    buffer = []
+    symbol_found = False
+
     for line_number, line in enumerate(lines, 1):
-        if '<o:p>&nbsp;</o:p>' in line:
-            # 在包含 <o:p>&nbsp;</o:p> 的行末尾添加注释
-            line = line.rstrip() + f" <!-- 绝对编码：{line_number} -->\n"
-        processed_lines.append(line)
+        buffer.append(line)
+        if any(sym in line for sym in symbols) or '<o:p>&nbsp;</o:p>' in line:
+            symbol_found = True
+        if '</p>' in line:
+            if symbol_found:
+                # Add comment to this line
+                line = line.rstrip() + f" <!-- 绝对编码：{line_number} -->\n"
+                buffer[-1] = line
+            processed_lines.extend(buffer)
+            buffer = []
+            symbol_found = False
+
+    # Add any remaining lines (if file doesn't end with </p>)
+    processed_lines.extend(buffer)
 
     # 返回修改后的内容
     return ''.join(processed_lines), encoding
+
+
+def clean_p_content(html_content):
+    # Clean only the inside of <p>...</p> tags, preserving all formatting.
+    def clean_inside_p(match):
+        open_tag = match.group(1)
+        content = match.group(2)
+        close_tag = match.group(3)
+        # Remove unwanted patterns from the content only
+        content = re.sub(r'font-family:[^;>\n\r]*[;>\n\r]?', '', content, flags=re.IGNORECASE)
+        content = re.sub(r'style=[\'\"].*?[\'\"]', '', content, flags=re.IGNORECASE)
+        content = re.sub(r'style=[^ >]*', '', content, flags=re.IGNORECASE)
+        content = re.sub(r'lang=[\'\"].*?[\'\"]', '', content, flags=re.IGNORECASE)
+        content = re.sub(r'lang=[^ >]*', '', content, flags=re.IGNORECASE)
+        content = re.sub(r'mso-[^;>\n\r]*[;>\n\r]?', '', content, flags=re.IGNORECASE)
+        return open_tag + content + close_tag
+    return re.sub(r'(<p[^>]*>)(.*?)(</p>)', clean_inside_p, html_content, flags=re.DOTALL|re.IGNORECASE)
 
 
 def clean_html(htm_file):
@@ -103,6 +138,10 @@ def clean_html(htm_file):
 
     # 删除空行
     html_content = '\n'.join([line for line in html_content.splitlines() if line.strip()])
+
+    # Clean inside <p> tags, preserving formatting
+    html_content = clean_p_content(html_content)
+    html_content = add_one_space_before_p_in_td(html_content)
 
     return html_content
 
